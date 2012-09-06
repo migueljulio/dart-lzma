@@ -28,6 +28,10 @@ References:
 
 #library("lzma");
 
+#import("../packages/fixnum/fixnum.dart");
+#import("dart:html");
+#import("dart:math", prefix:'Math');
+
 interface InStream {
   int readByte();
   
@@ -40,22 +44,24 @@ interface OutStream {
   int get length();
 }
 
-bool decompress(final InStream inStream, final OutStream outStream) {
+bool decompress(final InStream inStream, final OutStream outStream, [int outSize = null]) {
   final Decoder decoder = new Decoder();
 
   if ( !decoder.setDecoderProperties(inStream) ) {
     throw "Incorrect stream properties";
   }
 
-  int outSize = inStream.readByte();
-  outSize |= inStream.readByte() << 8;
-  outSize |= inStream.readByte() << 16;
-  outSize += inStream.readByte() * 16777216;
+  if (outSize == null) {
+    int outSize = inStream.readByte();
+    outSize |= inStream.readByte() << 8;
+    outSize |= inStream.readByte() << 16;
+    outSize += inStream.readByte() * 16777216;
   
-  inStream.readByte();
-  inStream.readByte();
-  inStream.readByte();
-  inStream.readByte();
+    inStream.readByte();
+    inStream.readByte();
+    inStream.readByte();
+    inStream.readByte();
+  }
   
   if ( !decoder.decode(inStream, outStream, outSize) ) {
     throw "Error in data stream";
@@ -130,7 +136,7 @@ class OutWindow {
     
   void create(final int windowSize) {
     if ( (null == _buffer) || (_windowSize !== windowSize) ) {
-      _buffer = new List<int>(windowSize);
+      _buffer = new Int32Array(windowSize);
     }
     
     _windowSize = windowSize;
@@ -218,8 +224,8 @@ class RangeDecoder {
   static final int _kBitModelTotal = 1 << _kNumBitModelTotalBits;
   static final int _kNumMoveBits = 5;
   
-  int _range;
-  int _code;
+  int32 _range;
+  int32 _code;
 
   InStream _stream;
   
@@ -232,58 +238,60 @@ class RangeDecoder {
   }
   
   void init() {
-    _code = 0;
-    _range = -1;
+    _code = new int32.fromInt(0);
+    _range = new int32.fromInt(-1);
     
     for (int i = 0; i < 5; ++ i) {
-      _code = (_code << 8) | _stream.readByte();
+      _code = _code << 8 | _stream.readByte();
     }
   }
 
-  int decodeDirectBits(final int numTotalBits) {
-    int result = 0;
+  int32 decodeDirectBits(final int numTotalBits) {
+    int32 result = int32.ZERO;
 
     for (int i = numTotalBits; i !== 0; -- i) {
-      _range = (_range >> 1) & 0x7fffffff;
-      final int t = ( (_code - _range) >> 31) & 0x1;
+      _range = _range.shiftRightUnsigned(1);
+      final int32 t = (_code - _range).shiftRightUnsigned(31);
       _code -= _range & (t - 1);
-      result = (result << 1) | (1 - t);
+      result = (result << 1) | (-t + 1);
 
-      if ( (_range & _kTopMask) === 0) {
+      if ( (_range & _kTopMask) == 0) {
         _code = (_code << 8) | _stream.readByte();
-        _range <<= 8;
+        _range = (_range << 8);
       }
     }
 
     return result;
   }
-
+  
   int decodeBit(final List<int> probs, final int index) {
     final int prob = probs[index];
 
-    final int newBound = ( (_range >> _kNumBitModelTotalBits) & 0x1fffff) * prob;
+    final int32 newBound = _range.shiftRightUnsigned(_kNumBitModelTotalBits) * prob;
 
-    if ( (_code ^ 0x80000000) < (newBound ^ 0x80000000) ) {
+    if ( ((_code ^ 0x80000000) < ((newBound ^ 0x80000000) ))) {
       _range = newBound;
-      probs[index] = prob + ( ( (_kBitModelTotal - prob) >> _kNumMoveBits) & 0x7ffffff);
-      
-      if ( (_range & _kTopMask) === 0) {
-        _code = (_code << 8) | _stream.readByte();
-        _range <<= 8;
+      probs[index] = prob +  new int32.fromInt( _kBitModelTotal - prob).shiftRightUnsigned(_kNumMoveBits).toInt();
+      if ( (_range & _kTopMask) == 0) {
+        var b = _stream.readByte();
+        var pos = _stream.dynamic.offset;
+        _code = (_code << 8) | b;
+        _range = (_range << 8);
       }
-      
+
       return 0;
     }
 
     _range -= newBound;
     _code -= newBound;
-    probs[index] = prob - ( (prob >> _kNumMoveBits) & 0x7ffffff);
+    probs[index] = prob - new int32.fromInt(prob).shiftRightUnsigned( _kNumMoveBits).toInt();
     
-    if ( (_range & _kTopMask) === 0) {
-      _code = (_code << 8) | _stream.readByte();
-      _range <<= 8;
+    if ( (_range & _kTopMask) == 0) {
+      var b = _stream.readByte();
+      _code = (_code << 8) | b; 
+      _range = (_range << 8);
     }
- 
+
     return 1;
   }
 
@@ -308,10 +316,11 @@ class BitTreeDecoder {
   }
 
   int decode(final RangeDecoder rangeDecoder) {
-    int m = 1;
+    int m = 1, i = _numBitLevels;
 
-    for (int i = _numBitLevels; i !== 0; -- i) {
-      m = (m << 1) | rangeDecoder.decodeBit(_models, m);
+    while ( i-- > 0) {
+      int tmp = rangeDecoder.decodeBit(this._models, m);
+      m = ( (m << 1) | tmp);
     }
     
     return m - (1 << _numBitLevels);
@@ -376,11 +385,11 @@ class LenDecoder {
   }
 
   int decode(final RangeDecoder rangeDecoder, final int posState) {
-    if (rangeDecoder.decodeBit(_choice, 0) === 0) {
+    if (rangeDecoder.decodeBit(_choice, 0) == 0) {
       return _lowCoder[posState].decode(rangeDecoder);
     }
     
-    if (rangeDecoder.decodeBit(_choice, 1) === 0) {
+    if (rangeDecoder.decodeBit(_choice, 1) == 0) {
       return Base.kNumLowLenSymbols + _midCoder[posState].decode(rangeDecoder);
     }
     
@@ -440,8 +449,8 @@ class LiteralDecoder {
 
   void create(final int numPosBits, final int numPrevBits) {
     if ( (null != _coders) &&
-        (_numPrevBits === numPrevBits) &&
-        (_numPosBits === numPosBits) ) {
+        (_numPrevBits == numPrevBits) &&
+        (_numPosBits == numPosBits) ) {
       return;
     }
     _numPosBits = numPosBits;
@@ -588,8 +597,8 @@ class Decoder {
     while (outSize < 0 || nowPos64 < outSize) {
       final int posState = nowPos64 & _posStateMask;
 
-      if (_rangeDecoder.decodeBit(_isMatchDecoders, (state << Base.kNumPosStatesBitsMax) + posState) === 0) {
-        final Decoder2 decoder2 = _literalDecoder.getDecoder(nowPos64, prevByte);
+      if (_rangeDecoder.decodeBit(_isMatchDecoders, (state << Base.kNumPosStatesBitsMax) + posState) == 0) {
+        final Decoder2 decoder2 = _literalDecoder.getDecoder(nowPos64++, prevByte);
 
         if ( !Base.stateIsCharState(state) ) {
           prevByte = decoder2.decodeWithMatchByte(_rangeDecoder, _outWindow.getByte(rep0) );
@@ -600,22 +609,21 @@ class Decoder {
 
         state = Base.stateUpdateChar(state);
         
-        ++ nowPos64;
       } else {
         int len;
-        if (_rangeDecoder.decodeBit(_isRepDecoders, state) === 1) {
+        if (_rangeDecoder.decodeBit(_isRepDecoders, state) == 1) {
           len = 0;
-          if (_rangeDecoder.decodeBit(_isRepG0Decoders, state) === 0) {
-            if (_rangeDecoder.decodeBit(_isRep0LongDecoders, (state << Base.kNumPosStatesBitsMax) + posState) === 0) {
+          if (_rangeDecoder.decodeBit(_isRepG0Decoders, state) == 0) {
+            if (_rangeDecoder.decodeBit(_isRep0LongDecoders, (state << Base.kNumPosStatesBitsMax) + posState) == 0) {
               state = Base.stateUpdateShortRep(state);
               len = 1;
             }
           } else {
             int distance;
-            if (_rangeDecoder.decodeBit(_isRepG1Decoders, state) === 0) {
+            if (_rangeDecoder.decodeBit(_isRepG1Decoders, state) == 0) {
               distance = rep1;
             } else {
-              if (_rangeDecoder.decodeBit(_isRepG2Decoders, state) === 0) {
+              if (_rangeDecoder.decodeBit(_isRepG2Decoders, state) == 0) {
                 distance = rep2;
               } else {
                 distance = rep3;
@@ -626,7 +634,7 @@ class Decoder {
             rep1 = rep0;
             rep0 = distance;
           }
-          if (0 === len) {
+          if (0 == len) {
             len = _repLenDecoder.decode(_rangeDecoder, posState) + Base.kMatchMinLen;
             state = Base.stateUpdateRep(state);
           }
@@ -648,10 +656,10 @@ class Decoder {
               rep0 += BitTreeDecoder.reverseDecode2(_posDecoders,
                   rep0 - posSlot - 1, _rangeDecoder, numDirectBits);
             } else {
-              rep0 += _rangeDecoder.decodeDirectBits(numDirectBits - Base.kNumAlignBits) << Base.kNumAlignBits;
+              rep0 += (_rangeDecoder.decodeDirectBits(numDirectBits - Base.kNumAlignBits) << Base.kNumAlignBits).toInt();
               rep0 += _posAlignDecoder.reverseDecode(_rangeDecoder);
               if (rep0 < 0) {
-                if (rep0 === -1) {
+                if (rep0 == -1) {
                   break;
                 }
                 return false;
@@ -695,8 +703,8 @@ class Decoder {
     }
 
     int dictionarySize = properties.readByte();
-    dictionarySize |= properties.readByte() << 8;
-    dictionarySize |= properties.readByte() << 16;
+    dictionarySize |= (properties.readByte() << 8);
+    dictionarySize |= (properties.readByte() << 16);
     dictionarySize += properties.readByte() * 16777216;
 
     return _setDictionarySize(dictionarySize);

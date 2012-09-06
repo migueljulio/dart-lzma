@@ -1,0 +1,7 @@
+name: dart-lzma
+version: 1.0.0
+description: >
+  A port of lzma to Dart
+dependencies:
+  fixnum:
+    sdk: fixnum
